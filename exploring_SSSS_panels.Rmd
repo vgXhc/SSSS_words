@@ -1,0 +1,298 @@
+---
+title: "Untitled"
+description: |
+  A new article created using the Distill format.
+author:
+  - name: Nora Jones 
+    url: https://example.com/norajones
+    affiliation: Spacely Sprockets
+    affiliation_url: https://example.com/spacelysprokets
+date: "`r Sys.Date()`"
+output: distill::distill_article
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+```{r}
+library(tidyverse)
+library(tidytext)
+library(rvest)
+```
+```{r}
+panel_url <- "https://www.4sonline.org/meeting/accepted-open-panels"
+panels <- read_html(panel_url)
+```
+
+```{r}
+
+panel_titles <- panels %>% html_nodes(".entry-title") %>% html_text()
+
+panel_desc <- panels %>% html_nodes(".post-content-inner") %>% html_text()
+
+panels_all <- tibble(panel_titles, panel_desc)
+
+panels_all2 <- panels_all %>% 
+  rename(title = panel_titles, description = panel_desc) %>% 
+  mutate(title = str_remove(title, "^\\d+.\\s")) %>% 
+  mutate(id = row_number())
+
+```
+
+```{r}
+titles <- panels_all2 %>% 
+  unnest_tokens(word, description, token = "words") %>% 
+  anti_join(get_stopwords())
+
+titles %>% 
+  count(word, id) %>% 
+  bind_tf_idf(word, id, n) %>%
+  arrange(-tf_idf)
+
+desc <- panels
+
+```
+Because the overview website only contains a shortened version of the panel descriptions, we'll extract the URLs of the panels and then scrape each of them.
+
+```{r}
+urls <- panels %>% 
+  html_nodes("#post-12988 a") %>% 
+  html_attr("href") %>% 
+  tibble()
+```
+The list of URLs is fairly clean, but there are still a few irrelevant URLs that slipped through. We'll filter them out with a regular expression.
+
+```{r}
+urls <- urls %>% 
+  rename(url = ".")
+
+#filter out irrelevant URLs
+urls <- urls %>% 
+  filter(str_detect(url, "https://www.4sonline.org/\\d")) %>% 
+  pull(url)
+```
+
+Now we can get all pages by using `map_df` across all URLs and a custom function to extract the relevant information. Let's develop the function first using the first URL
+
+
+
+```{r}
+page <- read_html(urls[1])
+
+page_2 <- page %>% 
+  html_nodes(".et_pb_text_inner , .et_pb_post_content_0_tb_body p, .et_pb_module_header") %>% 
+  html_text() 
+
+
+tibble(
+  title = page_2[1],
+  organizer = page_2[2],
+  posted = page_2[3],
+  desc = page_2[4],
+  contact = page_2[5],
+  keywords = page_2[6]
+)
+```
+
+Now we can just run the function over the length of the URL vector:
+
+```{r}
+pages_full <- map_df(1:length(urls), function(i) {
+  page <- read_html(urls[i])
+
+page_2 <- page %>% 
+  html_nodes(".et_pb_text_inner , .et_pb_post_content_0_tb_body p, .et_pb_module_header") %>% 
+  html_text() 
+
+tibble(
+  title = page_2[1],
+  organizer = page_2[2],
+  posted = page_2[3],
+  desc = page_2[4],
+  contact = page_2[5],
+  keywords = page_2[6]
+)
+  
+}
+  )
+```
+
+The scraping of the 210 pages takes a good while, and we'll save the object so that you don't have to scrape it yourself.
+
+```{r}
+write_RDS(pages_full, file = paste0("data/pages_full_", Sys.Date(), ".rds"))
+```
+
+Looking at the data frame, some issues become apparent.
+
+```{r}
+pages_full[2,]
+```
+Everything looks good until we get to the `contact` column: panels that have multiple `<p>` paragraphs in the description aren't properly scraped. 
+
+There may be a more elegant fix, but for now we change the code for the `html_nodes` to be more greedy and not split out individual paragraphs. The downside is that the contact info and keywords will be lumped in with the description, but we can fix that.
+
+
+```{r}
+pages_full <- map_df(1:length(urls), function(i) {
+  page <- read_html(urls[i])
+
+page_2 <- page %>% 
+  html_nodes(".et_pb_post_content_0_tb_body , .et_pb_text_inner, .et_pb_module_header") %>% 
+  html_text() 
+
+tibble(
+  title = page_2[1],
+  organizer = page_2[2],
+  posted = page_2[3],
+  desc = page_2[4]
+)
+  
+}
+  )
+```
+
+
+```{r}
+write_rds(pages_full, paste0("data/pages_full_", Sys.Date(), ".rds"))
+```
+
+Next we'll do a little cleaning, including fixing the issue with panel description, contact info, and keywords being lumped together.
+```{r}
+
+pages_full_2 <- pages_full %>% 
+  separate(organizer, c("organizer_1", "organizer_2", "organizer_3", "organizer_4", "organizer_5", "organizer_6", "organizer_7"), "; ") %>% 
+  mutate(id = str_extract(title, "^\\d*"),
+         title = str_remove(title, "^\\d*.\\s"),
+         keywords = str_extract(desc, "(?<=(Keywords\\:\\s))(.*)"),
+         desc = str_extract(desc, "(.|\\n)*(?=\\n\\nContact)")) %>% #return everything before contact
+  separate(keywords, c("keyword_1", "keyword_2", "keyword_3", "keyword_4", "keyword_5", "keyword_6"), ",|;")
+
+pages_full_2 %>% 
+  sep
+
+```
+
+Let's do some basic text analysis. What are the most commonly used words (with commonly used words removed)?
+
+```{r}
+pages_full_2 %>% 
+  unnest_tokens(word, desc, token = "words") %>% 
+  anti_join(get_stopwords()) %>% 
+  count(word, sort = TRUE)
+```
+
+Not terribly exciting, except maybe for the fact that "care" the 15th most common word, used 120 times. "Care" appears to be an en vogue concept in the field.
+
+Let's do the same but for bigrams.
+
+```{r}
+pages_full_2 %>% 
+  unnest_tokens(word, desc, token = "ngrams", n = 2) %>% 
+  count(word, sort = TRUE)
+```
+This is not super informative. We need to filter out bigrams that contain stop words.
+
+```{r}
+bigram <- pages_full_2 %>% 
+  unnest_tokens(bigram, desc, token = "ngrams", n = 2)
+
+bigrams_separated <- bigram %>% separate(bigram, c("word1", "word2"), sep = " ")
+
+bigrams_filtered <- bigrams_separated %>% 
+    filter(!word1 %in% stop_words$word) %>%
+  filter(!word2 %in% stop_words$word)
+```
+
+Let's try again with the filtered bigrams:
+
+```{r}
+bigrams_filtered %>% count(word1, word2, sort = TRUE)
+```
+Much better!
+
+What happens with tri-grams? For trigrams, we may not have to remove stop words.
+
+```{r}
+pages_full_2 %>% 
+  unnest_tokens(word, desc, token = "ngrams", n = 3) %>% 
+  count(word, sort = TRUE)
+```
+
+```{r}
+trigram <- pages_full_2 %>% 
+  unnest_tokens(trigram, desc, token = "ngrams", n = 3)
+
+trigrams_separated <- trigram %>% separate(trigram, c("word1", "word2", "word3"), sep = " ")
+
+trigrams_filtered <- trigrams_separated %>% 
+    filter(!word1 %in% stop_words$word) %>%
+  filter(!word2 %in% stop_words$word) %>% 
+  filter(!word3 %in% stop_words$word)
+
+trigrams_filtered %>% 
+  count(word1, word2, word3, sort = T)
+```
+
+For trigrams, filtering for stop words seems less than ideal, as it filters out phrases like "the global south" that otherwise would feature prominently.
+
+```{r}
+pages_full_2 %>% 
+  unnest_tokens(word, desc, token = "words")
+# %>% 
+#   anti_join(get_stopwords())
+
+pages_full_2 %>% 
+  unnest_tokens(word, desc, token = "words") %>% 
+  count(word, id) %>% 
+  bind_tf_idf(word, id, n) %>%
+  arrange(-tf_idf)
+
+
+pages_full_2 %>% 
+  unnest_tokens(word, desc, token = "ngrams") %>% 
+  count(word, id) %>% 
+  bind_tf_idf(word, id, n) %>%
+  arrange(-tf_idf)
+
+
+
+```
+
+
+Creating a network graph for bigrams:
+
+```{r}
+bigram_count <- bigrams_filtered %>% count(word1, word2, sort = TRUE)
+
+library(igraph)
+
+bigram_graph <- bigram_count %>%
+  filter(n > 8) %>%
+  graph_from_data_frame()
+
+library(ggraph)
+
+set.seed(2017)
+
+ggraph(bigram_graph, layout = "fr") +
+  geom_edge_link() +
+  geom_node_point() +
+  geom_node_text(aes(label = name), vjust = 1, hjust = 1)
+```
+
+```{r}
+
+set.seed(2020)
+
+a <- grid::arrow(type = "closed", length = unit(.15, "inches"))
+
+ggraph(bigram_graph, layout = "fr") +
+  geom_edge_link(aes(edge_alpha = n), show.legend = FALSE,
+                 arrow = a, end_cap = circle(.07, 'inches')) +
+  geom_node_point(color = "lightblue", size = 5) +
+  geom_node_text(aes(label = name), vjust = 1, hjust = 1) +
+  theme_void()
+```
+
