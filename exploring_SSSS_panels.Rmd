@@ -1,7 +1,7 @@
 ---
-title: "Untitled"
+title: "Scraping 4S"
 description: |
-  A new article created using the Distill format.
+  Teaching myself some web scraping and text analysis of the Society of Social Studies of Science's annual meeting panel data
 author:
   - name: Nora Jones 
     url: https://example.com/norajones
@@ -15,6 +15,16 @@ output: distill::distill_article
 knitr::opts_chunk$set(echo = FALSE)
 ```
 
+I recently went though Julia Silge's great interactive [`tidytext` tutorial](https://juliasilge.shinyapps.io/learntidytext/) to learn some basics of text analysis. Last weekend, my SO was reading through the panel descriptions of the Society for the Social Studies of Science's (4S) annual meeting to figure out which panel to submit an abstract to. There were over 200 panels to choose from, and so I figured this would be a good opportunity to practice some of the text mining techniques I learned. Here we go.
+
+The `tidytext` tutorial works with data sets that are already nice and clean. For the 4S panels  we need to do some web scraping and data cleaning first. The web scraping with `rvest` is also a first for me.
+
+All panels are listed on this page: [https://www.4sonline.org/meeting/accepted-open-panels/](https://www.4sonline.org/meeting/accepted-open-panels/). We could scrape the panel titles and descriptions right there. Note, however, that the description here is only a snippet, not the full panel description. We'll deal with this later.
+
+Step one is to load the relevant libraries and read in the html page.
+
+
+
 ```{r}
 library(tidyverse)
 library(tidytext)
@@ -23,43 +33,65 @@ library(rvest)
 ```{r}
 panel_url <- "https://www.4sonline.org/meeting/accepted-open-panels"
 panels <- read_html(panel_url)
+panels
 ```
+The next step is to extract the relevant information from that HTML document. If you have a basic understanding of how HTML and CSS work, you could do this by opening the source code of the page in your browser and manually identify the relevant elements. 
 
+![Screenshot source code](img/Screenshot_h3_class.png)
+
+Here you see that the panel titles are all level 3 headings (`<h3>`) of the `class` `entry-title`. An easier way to identify the element is by using your browser's element picker. In Firefox, press `F12` and choose the element picker. Then choose the element you want to identify and look at the code in the Inspector window. Here's a screenshot of what this looks like for the panel description:
+
+![Screenshot element picker](img/Screenshot_element_picker.png)
+
+So the panel description is a `div` of the class `post-inner-content`. (There is a third method to identify relevant content, which we'll use later). 
+
+With this information, we'd be ready to extract panel titles and descriptions:
 ```{r}
 
 panel_titles <- panels %>% html_nodes(".entry-title") %>% html_text()
 
 panel_desc <- panels %>% html_nodes(".post-content-inner") %>% html_text()
 
-panels_all <- tibble(panel_titles, panel_desc)
-
-panels_all2 <- panels_all %>% 
-  rename(title = panel_titles, description = panel_desc) %>% 
-  mutate(title = str_remove(title, "^\\d+.\\s")) %>% 
-  mutate(id = row_number())
-
+panels_all <- tibble(title = panel_titles, desc = panel_desc)
 ```
+
+A quick bit of data cleaning to remove the numbers from the titles and use them as an id column instead:
 
 ```{r}
-titles <- panels_all2 %>% 
-  unnest_tokens(word, description, token = "words") %>% 
-  anti_join(get_stopwords())
-
-titles %>% 
-  count(word, id) %>% 
-  bind_tf_idf(word, id, n) %>%
-  arrange(-tf_idf)
-
-desc <- panels
-
+panels_all <- panels_all %>% 
+  mutate(id = str_extract(title, "^\\d*"),
+         title = str_remove(title, "^\\d+.\\s"))
+  
+panels_all
 ```
-Because the overview website only contains a shortened version of the panel descriptions, we'll extract the URLs of the panels and then scrape each of them.
+
+Looks pretty good, doesn't it? Let's do a simple analysis: What are the most frequent words in the panel titles (after removing common stop words)?
+
+```{r}
+panels_all %>% 
+  unnest_tokens(word, title, token = "words") %>% 
+  anti_join(get_stopwords()) %>% 
+  count(word, sort = T)
+```
+
+Unsurprisingly, STS has the top spot -- it's the acronym for the whole field: Science and Technology Studies. We can do the same for the panel descriptions:
+
+
+```{r}
+panels_all %>% 
+  unnest_tokens(word, desc, token = "words") %>% 
+  anti_join(get_stopwords()) %>% 
+  count(word, sort = T)
+```
+Before diving deeper into the analysis, let's first get the complete descriptions. This requires following all the links from the panel titles and scraping those pages. This is a good opportunity to use third option of identifying elements in an HTML page: Rvest's Selector Gadget. We can extract the URLs like so: 
 
 ```{r}
 urls <- panels %>% 
   html_nodes("#post-12988 a") %>% 
   html_attr("href") %>% 
   tibble()
+
+tail(urls)
 ```
 The list of URLs is fairly clean, but there are still a few irrelevant URLs that slipped through. We'll filter them out with a regular expression.
 
@@ -73,8 +105,7 @@ urls <- urls %>%
   pull(url)
 ```
 
-Now we can get all pages by using `map_df` across all URLs and a custom function to extract the relevant information. Let's develop the function first using the first URL
-
+Now we can get all pages by using `map_df` across all URLs and a custom function to extract the relevant information. Let's develop the function first using the first URL. Again using the Selector Gadget, it seems like these should be the relevant elements to extract:
 
 
 ```{r}
@@ -95,7 +126,7 @@ tibble(
 )
 ```
 
-Now we can just run the function over the length of the URL vector:
+Now we can just run the function over the length of the URL vector with [`map_df`](https://purrr.tidyverse.org/reference/map.html)
 
 ```{r}
 pages_full <- map_df(1:length(urls), function(i) {
@@ -118,12 +149,6 @@ tibble(
   )
 ```
 
-The scraping of the 210 pages takes a good while, and we'll save the object so that you don't have to scrape it yourself.
-
-```{r}
-write_RDS(pages_full, file = paste0("data/pages_full_", Sys.Date(), ".rds"))
-```
-
 Looking at the data frame, some issues become apparent.
 
 ```{r}
@@ -131,7 +156,7 @@ pages_full[2,]
 ```
 Everything looks good until we get to the `contact` column: panels that have multiple `<p>` paragraphs in the description aren't properly scraped. 
 
-There may be a more elegant fix, but for now we change the code for the `html_nodes` to be more greedy and not split out individual paragraphs. The downside is that the contact info and keywords will be lumped in with the description, but we can fix that.
+There may be a more elegant fix, but for now we change the code for the `html_nodes` to be less specific and not split out individual paragraphs. The downside is that the contact info and keywords will be lumped in with the description, but we can fix that later
 
 
 ```{r}
@@ -148,18 +173,21 @@ tibble(
   posted = page_2[3],
   desc = page_2[4]
 )
+
   
 }
   )
 ```
 
-
+As scraping 210 pages takes a long time, we'll save the results as an `rds` file.
 ```{r}
 write_rds(pages_full, paste0("data/pages_full_", Sys.Date(), ".rds"))
 ```
 
-Next we'll do a little cleaning, including fixing the issue with panel description, contact info, and keywords being lumped together.
+Next we'll do some cleaning of the panel data, including fixing the issue with panel description, contact info, and keywords being lumped together. This requires some regular expression magic.
+
 ```{r}
+pages_full <- read_rds("data/pages_full_2021-03-07.rds")
 
 pages_full_2 <- pages_full %>% 
   separate(organizer, c("organizer_1", "organizer_2", "organizer_3", "organizer_4", "organizer_5", "organizer_6", "organizer_7"), "; ") %>% 
@@ -169,15 +197,60 @@ pages_full_2 <- pages_full %>%
          desc = str_extract(desc, "(.|\\n)*(?=\\n\\nContact)")) %>% #return everything before contact
   separate(keywords, c("keyword_1", "keyword_2", "keyword_3", "keyword_4", "keyword_5", "keyword_6"), ",|;")
 
-pages_full_2 %>% 
-  sep
+pages_full_2
 
 ```
+
+
+
+In addition to the what is contained in the individual panel pages, there are also topic areas/themes for panels:
+
+![Topic areas](img/Screenshot_topic_areas.png)
+
+```{r}
+theme_urls <- panels %>% 
+  html_nodes("#menu-op21 a") %>%
+  html_attr("href")
+
+theme_labels <- panels %>% 
+  html_nodes("#menu-op21 a") %>%
+  html_text()
+```
+
+We'll have to download all the theme pages to then extract the panel IDs.
+
+```{r}
+themes_full <- map_df(1:length(theme_urls), function(i) {
+  page <- read_html(theme_urls[i])
+theme <- theme_labels[[i]]
+
+page_2 <- page %>% 
+  html_nodes(".entry-title") %>% 
+  html_text()
+
+tibble(title = page_2, theme) %>% 
+  mutate(id = str_extract(title, "^\\d*"),
+         title = str_remove(title, "^\\d*.\\s"))
+}
+)
+
+glimpse(themes_full)
+```
+We can see that there are 582 observations for 210 panels. So a panel can be listed in more than one theme. In the final step of data prep,  we do a join with the theme data and create a format where each panel is represented by one row. 
+
+```{r}
+pages_full_wide <- pages_full_2 %>% 
+  left_join(themes_full, by = c("id", "title")) %>% 
+  pivot_wider(names_from = theme, values_from = theme, names_prefix = "theme_") %>% 
+  unite(theme, starts_with("theme_"), na.rm = T, sep = ";") %>% 
+  separate(theme, c("theme_1", "theme_2", "theme_3"), sep = ";")
+```
+
 
 Let's do some basic text analysis. What are the most commonly used words (with commonly used words removed)?
 
 ```{r}
-pages_full_2 %>% 
+pages_full_wide %>% 
   unnest_tokens(word, desc, token = "words") %>% 
   anti_join(get_stopwords()) %>% 
   count(word, sort = TRUE)
@@ -188,14 +261,14 @@ Not terribly exciting, except maybe for the fact that "care" the 15th most commo
 Let's do the same but for bigrams.
 
 ```{r}
-pages_full_2 %>% 
+pages_full_wide %>% 
   unnest_tokens(word, desc, token = "ngrams", n = 2) %>% 
   count(word, sort = TRUE)
 ```
 This is not super informative. We need to filter out bigrams that contain stop words.
 
 ```{r}
-bigram <- pages_full_2 %>% 
+bigram <- pages_full_wide %>% 
   unnest_tokens(bigram, desc, token = "ngrams", n = 2)
 
 bigrams_separated <- bigram %>% separate(bigram, c("word1", "word2"), sep = " ")
@@ -215,13 +288,13 @@ Much better!
 What happens with tri-grams? For trigrams, we may not have to remove stop words.
 
 ```{r}
-pages_full_2 %>% 
+pages_full_wide %>% 
   unnest_tokens(word, desc, token = "ngrams", n = 3) %>% 
   count(word, sort = TRUE)
 ```
 
 ```{r}
-trigram <- pages_full_2 %>% 
+trigram <- pages_full_wide %>% 
   unnest_tokens(trigram, desc, token = "ngrams", n = 3)
 
 trigrams_separated <- trigram %>% separate(trigram, c("word1", "word2", "word3"), sep = " ")
@@ -238,19 +311,19 @@ trigrams_filtered %>%
 For trigrams, filtering for stop words seems less than ideal, as it filters out phrases like "the global south" that otherwise would feature prominently.
 
 ```{r}
-pages_full_2 %>% 
+pages_full_wide %>% 
   unnest_tokens(word, desc, token = "words")
 # %>% 
 #   anti_join(get_stopwords())
 
-pages_full_2 %>% 
+pages_full_wide %>% 
   unnest_tokens(word, desc, token = "words") %>% 
   count(word, id) %>% 
   bind_tf_idf(word, id, n) %>%
   arrange(-tf_idf)
 
 
-pages_full_2 %>% 
+pages_full_wide %>% 
   unnest_tokens(word, desc, token = "ngrams") %>% 
   count(word, id) %>% 
   bind_tf_idf(word, id, n) %>%
@@ -288,11 +361,13 @@ set.seed(2020)
 
 a <- grid::arrow(type = "closed", length = unit(.15, "inches"))
 
-ggraph(bigram_graph, layout = "fr") +
+g <- ggraph(bigram_graph, layout = "fr") +
   geom_edge_link(aes(edge_alpha = n), show.legend = FALSE,
                  arrow = a, end_cap = circle(.07, 'inches')) +
   geom_node_point(color = "lightblue", size = 5) +
   geom_node_text(aes(label = name), vjust = 1, hjust = 1) +
   theme_void()
+
+ggsave("plot.png", g)
 ```
 
