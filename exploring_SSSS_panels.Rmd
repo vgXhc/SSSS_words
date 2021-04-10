@@ -298,6 +298,7 @@ bigrams_filtered <- bigrams_separated %>%
 
 
 bigrams_filtered %>% count(word1, word2, sort = TRUE) %>% 
+  head(500) %>% 
   paged_table()
 ```
 
@@ -324,6 +325,7 @@ trigrams_filtered <- trigrams_separated %>%
 
 trigrams_filtered %>% 
   count(word1, word2, word3, sort = T) %>% 
+  filter(n<1) %>% 
   paged_table()
 
 
@@ -343,6 +345,7 @@ panels_full_wide %>%
   left_join(panels_full_wide, by = "id") %>% 
   select(word, n, tf_idf, title) %>% 
   arrange(-tf_idf) %>% 
+  head(500) %>% 
   paged_table()
 ```
 
@@ -356,6 +359,7 @@ panels_full_long %>%
   bind_tf_idf(word, id, n) %>%
   select(theme, word, n, tf_idf) %>% 
   arrange(-tf_idf) %>% 
+  head(500) %>% 
   paged_table()
 ```
 
