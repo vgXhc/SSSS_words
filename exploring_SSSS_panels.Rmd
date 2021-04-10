@@ -12,22 +12,21 @@ compare_updates_url:
 creative_commons: CC BY-SA
 output: 
   distill::distill_article:
-    code_folding: show
-    self-contained: false
+    toc: true
+    code_folding: true
+    self_contained: false
 bibliography: references.bib
 ---
-
-
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = T)
 ```
 
-I recently went though Julia Silge's great interactive [`tidytext` tutorial](https://juliasilge.shinyapps.io/learntidytext/) to learn some basics of text analysis. Last weekend, my SO was reading through the panel descriptions of the Society for the Social Studies of Science's (4S) annual meeting to figure out which panel to submit an abstract to. There were over 200 panels to choose from, and so this would be a good opportunity to practice some of the techniques I learned.
+I recently went though Julia Silge's great interactive [`tidytext` tutorial](https://juliasilge.shinyapps.io/learntidytext/) to learn some basics of text analysis. Last weekend, my SO was reading through the panel descriptions of the [Society for the Social Studies of Science's (4S) annual meeting](https://www.4sonline.org/meeting/) to figure out which panel to submit an abstract to. There were over 200 panels to choose from, and so this would be a good opportunity to practice some of the techniques I learned.
 
-The `tidytext` tutorial works with data sets that are already nice and clean. For the 4S panels we need to do some web scraping and data cleaning first. The web scraping with `rvest` is also a first for me. The [first part of this post](#scraping-data) will cover the scraping and cleaning. If you want to read about the text analysis, skip ahead to [the second part](#mining-SSSS).
+The `tidytext` tutorial works with data sets that are already nice and clean. For the 4S panels we need to do some web scraping and data cleaning first. The web scraping with `rvest` is also a first for me. The first part of this post will cover the scraping and cleaning. If you want to read about the text analysis, skip ahead to [the second part](#text-mining-ssss-panels).
 
-# Scraping the data
+# Scraping the data {#scraping-the-data}
 
 All panels are listed on this page: <https://www.4sonline.org/meeting/accepted-open-panels/>. We could scrape the panel titles and descriptions right there. Note, however, that the description here is only a snippet, not the full panel description. We'll deal with this later.
 
@@ -191,7 +190,7 @@ panels_full_wide <- pages_full %>%
          title = str_remove(title, "^\\d*.\\s"),
          keywords = str_extract(desc, "(?<=(Keywords\\:\\s))(.*)"),
          desc = str_extract(desc, "(.|\\n)*(?=\\n\\nContact)")) %>% #return everything before contact
-  separate(keywords, c("keyword_1", "keyword_2", "keyword_3", "keyword_4", "keyword_5", "keyword_6"), ",|;")
+  separate(keywords, c("keyword_1", "keyword_2", "keyword_3", "keyword_4", "keyword_5", "keyword_6", "keyword_7", "keyword_8"), ",|;")
 
 panels_full_wide
 
@@ -258,13 +257,158 @@ glimpse(panels_full_long)
 
 That's it for data prep! For your convenience, here are the two data frames:
 
-- One row per panel (wide format)
-  - [rds](data/panels_full_wide_2021-03-28 10-14-01.RDS)
-  - [csv](data/panels_full_wide_2021-03-28 10-12-51.csv)
-- multiple rows per panel (long format)
-  - [rds](data/panels_full_long_2021-03-28 10-14-15.RDS)
-  - [csv](data/panels_full_long_2021-03-28 10-12-17.csv)
+-   One row per panel (wide format)
+    -   [rds](dat04-10-13-44-29.RDS)
+    -   [csv](data/panels_full_wide_2021-04-10-13-45-36.csv)
+-   multiple rows per panel (long format)
+    -   [rds](data/panels_full_long_2021-04-10-13-44-56.RDS)
+    -   [csv](data/panels_full_long_2021-04-10-13-45-50.csv)
 
-# Mining SSSS panels
+# Text Mining SSSS panels {#text-mining-ssss-panels}
+
+Let's do some basic text mining on the cleaned panel data. What are the words most commonly used in the panel descriptions, with stop words like "the", "you", "a", ... removed?
+
+## Unigrams, bigrams, trigrams
+
+```{r}
+panels_full_wide %>% 
+  unnest_tokens(word, desc, token = "words") %>% 
+  anti_join(get_stopwords()) %>% 
+  count(word, sort = TRUE)
+```
+
+Not terribly exciting, is it? Let's do the same but for bigrams.
+
+```{r}
+panels_full_wide %>% 
+  unnest_tokens(word, desc, token = "ngrams", n = 2) %>% 
+  count(word, sort = TRUE)
+```
+
+```{r}
+bigram <- panels_full_wide %>% 
+  unnest_tokens(bigram, desc, token = "ngrams", n = 2)
+
+bigrams_separated <- bigram %>% separate(bigram, c("word1", "word2"), sep = " ")
+
+bigrams_filtered <- bigrams_separated %>% 
+    filter(!word1 %in% stop_words$word) %>%
+  filter(!word2 %in% stop_words$word)
 
 
+
+bigrams_filtered %>% count(word1, word2, sort = TRUE) %>% 
+  paged_table()
+```
+
+Much better? If two is better than one, is three better than two? Let's try trigrams, without stop word filtering.
+
+```{r}
+panels_full_wide %>% 
+  unnest_tokens(word, desc, token = "ngrams", n = 3) %>% 
+  count(word, sort = TRUE)
+```
+
+This does still have a lot of not-so-meaningful rows, and we'll see what happens if we filter for stop words:
+
+```{r}
+trigram <- panels_full_wide %>% 
+  unnest_tokens(trigram, desc, token = "ngrams", n = 3)
+
+trigrams_separated <- trigram %>% separate(trigram, c("word1", "word2", "word3"), sep = " ")
+
+trigrams_filtered <- trigrams_separated %>% 
+    filter(!word1 %in% stop_words$word) %>%
+  filter(!word2 %in% stop_words$word) %>% 
+  filter(!word3 %in% stop_words$word)
+
+trigrams_filtered %>% 
+  count(word1, word2, word3, sort = T) %>% 
+  paged_table()
+
+
+```
+
+For trigrams, filtering for stop words is tricky. The filtered analysis has fewer irrelevant trigrams such as "in order to" or "as well as," but it also filters out meaningful phrases like "the global south" that otherwise would feature prominently.
+
+## Term frequency--inverse document frequency
+
+Going further than just counting words and ngrams, we can look at their relevance in comparison to the whole of all panel descriptions. This addresses the issue that terms like "science and technology" or "this open panel" are going to feature in a large number of panel descriptions and therefore don't add a lot of information. To do this, we look at the term frequency--inverse document frequency (tf-idf), "a numerical statistic that is intended to reflect how important a word is to a document in a collection or corpus."[@tfidf2021a] The `tidytext` package has the convenient `bind_tf_idf()` function for this:
+
+```{r}
+panels_full_wide %>% 
+  unnest_tokens(word, desc, token = "words") %>% 
+  count(word, id) %>% 
+  bind_tf_idf(word, id, n) %>%
+  left_join(panels_full_wide, by = "id") %>% 
+  select(word, n, tf_idf, title) %>% 
+  arrange(-tf_idf) %>% 
+  paged_table()
+```
+
+We can do the same analysis but group the panels by theme to identify distinctive trigrams for each of the themes. This is where the long format of the panel data is needed. We won't filter the trigrams for stop words here, as the tf-idf function will by itself get rid of phrases such as "as well as" or "this open panel".
+
+```{r layout="l-body-outset"}
+panels_full_long %>% 
+  unnest_tokens(word, desc, token = "ngrams") %>% 
+  group_by(theme) %>% 
+  count(word, id) %>% 
+  bind_tf_idf(word, id, n) %>%
+  select(theme, word, n, tf_idf) %>% 
+  arrange(-tf_idf) %>% 
+  paged_table()
+```
+
+# Visualizations
+
+Tables are nice, but graphs are great too. Let's create a network graph of the most common bigrams, using the `igraph` and `ggraph` packages.
+
+```{r}
+library(igraph)
+library(ggraph)
+bigram_count <- bigrams_filtered %>% count(word1, word2, sort = TRUE)
+
+
+bigram_graph <- bigram_count %>%
+  filter(n > 8) %>%
+  graph_from_data_frame()
+
+a <- grid::arrow(type = "closed", length = unit(.10, "inches"))
+
+ggraph(bigram_graph, layout = "fr") +
+  geom_edge_link(aes(edge_alpha = n), show.legend = FALSE,
+                 arrow = a, end_cap = circle(.05, 'inches')) +
+  geom_node_point(color = "lightblue", size = 5) +
+  geom_node_text(aes(label = name), vjust = 1, hjust = 1) +
+  theme_void()
+```
+
+And let's end on the OG of text visualizations: the word cloud (or in this case: the bigram cloud). To make it pretty, we filtered for a number of manually defined stop words such as "sts," "panel", or "university press."
+
+```{r layout="l-body-outset", preview = TRUE}
+library(wordcloud)
+custom_stop_words <- c("panel",
+                       "panels",
+                       "sts",
+                       "paper",
+                       "papers",
+                       "mit",
+                       "press")
+custom_stop_bigrams <- c("university press",
+                       "conference theme",
+                       "durham duke",
+                       "duke university",
+                       "encourage papers",
+                       "science technology",
+                       "science studies",
+                       "social studies",
+                       "technology studies")
+
+bigrams_filtered %>% 
+  filter(!word1 %in% custom_stop_words) %>% 
+  filter(!word2 %in% custom_stop_words) %>% 
+  mutate(word = paste(word1, word2)) %>% 
+  filter(!word %in% custom_stop_bigrams) %>% 
+  count(word, sort = T) %>% 
+  with(wordcloud(word, n, max.words = 25, scale = c(2.5, .5),random.order = FALSE, colors = brewer.pal(8,"Dark2")))
+```
